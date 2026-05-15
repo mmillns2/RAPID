@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DAQ Viewer</title>
+
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+
+<style>
+
+/* Base layout */
+
+body{
+  margin:0;
+  font-family:Arial, sans-serif;
+  background:#fafafa;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+}
+
+/* Header */
+
+header{
+  background:white;
+  padding:10px 15px;
+  border-bottom:1px solid #ccc;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+}
+
+nav a{
+  margin-left:10px;
+  text-decoration:none;
+  color:#004;
+  font-weight:600;
+}
+
+/* Controls area */
+
+#controls{
+  padding:12px;
+}
+
+.stage-grid{
+  display:flex;
+  flex-wrap:wrap;
+  gap:12px;
+}
+
+.stage{
+  border:1px solid #ddd;
+  border-radius:6px;
+  padding:10px;
+  background:white;
+  min-width:180px;
+}
+
+/* Range controls */
+
+#range-controls{
+  padding:10px 15px;
+}
+
+#range-controls input{
+  width:100px;
+  padding:4px;
+  margin-right:10px;
+}
+
+/* Plot container */
+
+#plot-container{
+  flex:1;
+  border:3px solid #ccc;
+  border-radius:6px;
+  background:white;
+  padding:8px;
+  margin:10px;
+  box-sizing:border-box;
+  box-shadow:0 1px 3px rgba(0,0,0,0.08);
+}
+
+#plot{
+  width:100%;
+  height:100%;
+}
+
+</style>
+</head>
+
+<body>
+
+<header>
+  <h2>DAQ Viewer</h2>
+</header>
+
+<div id="controls"></div>
+
+<div id="range-controls">
+  Xmin: <input id="xmin" type="number" step="any">
+  Xmax: <input id="xmax" type="number" step="any">
+</div>
+
+<div id="plot-container">
+  <div id="plot"></div>
+</div>
+
+<script>
+
+let snapshot = {};
+let plotDiv = document.getElementById("plot");
+
+/* per-stage ranges */
+let stageRanges = {};
+
+
+/* Fetch data */
+
+async function fetchData(){
+  const r = await fetch("/api/daq");
+  snapshot = await r.json();
+}
+
+
+/* Build stage UI */
+
+function buildControls(){
+
+  const controls = document.getElementById("controls");
+  controls.innerHTML = "";
+
+  if(!snapshot.waveforms) return;
+
+  const grid = document.createElement("div");
+  grid.className = "stage-grid";
+
+  for(const wf in snapshot.waveforms){
+
+    const box = document.createElement("div");
+    box.className = "stage";
+
+    const title = snapshot.meta?.[wf]?.title || `Stage ${wf}`;
+
+    box.innerHTML = `<strong>${title}</strong><br>`;
+
+    const data = snapshot.waveforms[wf];
+
+    ["i","q"].forEach(type => {
+
+      if(!(type in data)) return;
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.dataset.wf = wf;
+      cb.dataset.type = type;
+
+      cb.onchange = () => {
+
+        document.querySelectorAll("input[type=checkbox]").forEach(other => {
+          if(other !== cb && other.dataset.wf !== cb.dataset.wf){
+            other.checked = false;
+          }
+        });
+
+        restoreRange(wf);
+        updatePlot();
+      };
+
+      const label = document.createElement("label");
+      label.appendChild(cb);
+      label.append(` ${type.toUpperCase()}`);
+
+      box.appendChild(label);
+      box.appendChild(document.createElement("br"));
+    });
+
+    grid.appendChild(box);
+  }
+
+  controls.appendChild(grid);
+}
+
+
+/* Range persistence */
+
+function saveCurrentRange(stage){
+
+  const xmin = parseFloat(document.getElementById("xmin").value);
+  const xmax = parseFloat(document.getElementById("xmax").value);
+
+  if(stage){
+    stageRanges[stage] = { xmin, xmax };
+  }
+}
+
+function restoreRange(stage){
+
+  const r = stageRanges[stage];
+  if(!r) return;
+
+  document.getElementById("xmin").value = r.xmin ?? "";
+  document.getElementById("xmax").value = r.xmax ?? "";
+}
+
+
+/* Unit scaling */
+
+function getUnitScale(unit){
+
+  if(!unit) return 1;
+
+  if(unit.includes("GHz")) return 1e9;
+  if(unit.includes("MHz")) return 1e6;
+  if(unit.includes("kHz")) return 1e3;
+
+  return 1;
+}
+
+
+/* Build X axis */
+
+function buildX(meta, N){
+
+  if(!meta) return [...Array(N).keys()];
+
+  const type = meta.type;
+  const fs = meta.sample_rate || 1;
+  const unit = meta.x_unit || "Hz";
+
+  if(type === "waveform"){
+    return [...Array(N).keys()];
+  }
+
+  if(type === "psd" || type === "fft"){
+
+    const df = fs / N;
+    const scale = getUnitScale(unit);
+
+    let x = [];
+
+    for(let i = 0; i < N; i++){
+      x.push((i * df) / scale);
+    }
+
+    return x;
+  }
+
+  return [...Array(N).keys()];
+}
+
+
+/* Plot update */
+
+function updatePlot(){
+
+  if(!snapshot.waveforms) return;
+
+  let traces = [];
+  let selectedWF = null;
+
+  const xmin = parseFloat(document.getElementById("xmin").value);
+  const xmax = parseFloat(document.getElementById("xmax").value);
+
+  document.querySelectorAll("input:checked").forEach(cb => {
+
+    const wf = cb.dataset.wf;
+
+    if(selectedWF === null){
+      selectedWF = wf;
+    } else if(selectedWF !== wf){
+      return;
+    }
+
+    const type = cb.dataset.type;
+
+    const data = snapshot.waveforms[wf];
+    const meta = snapshot.meta?.[wf];
+
+    if(!data || !data[type]) return;
+
+    const y = data[type];
+    const x = buildX(meta, y.length);
+
+    let xf = [];
+    let yf = [];
+
+    for(let i = 0; i < x.length; i++){
+
+      if(!isNaN(xmin) && x[i] < xmin) continue;
+      if(!isNaN(xmax) && x[i] > xmax) continue;
+
+      xf.push(x[i]);
+      yf.push(y[i]);
+    }
+
+    traces.push({
+      x: xf,
+      y: yf,
+      mode: "lines",
+      name: `${meta?.title || wf} ${type.toUpperCase()}`
+    });
+
+  });
+
+  if(selectedWF !== null){
+    saveCurrentRange(selectedWF);
+  }
+
+  let xLabel = "X";
+  let yLabel = "Y";
+  let title = "DAQ Viewer";
+
+  if(selectedWF !== null){
+    const meta = snapshot.meta?.[selectedWF];
+    if(meta){
+      xLabel = meta.x_unit || xLabel;
+      yLabel = meta.y_unit || yLabel;
+
+      // ---- NEW: include timestamp (clock cycles) ----
+      const ts = snapshot.waveforms?.[selectedWF]?.ts;
+      const tsText = (ts !== undefined) ? `  -  Timestamp: ${ts} cycles` : "";
+
+      title = (meta.title || "DAQ Viewer") + tsText;
+    }
+  }
+
+  Plotly.react(plotDiv, traces, {
+    title: title,
+    xaxis: { title: xLabel },
+    yaxis: { title: yLabel },
+    margin: { t: 40 }
+  });
+}
+
+
+/* Refresh loop */
+
+async function refresh(){
+
+  await fetchData();
+
+  if(!document.getElementById("controls").hasChildNodes()){
+    buildControls();
+  }
+
+  updatePlot();
+}
+
+setInterval(refresh, 500);
+
+</script>
+
+</body>
+</html>
