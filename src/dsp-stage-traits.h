@@ -30,36 +30,36 @@ template <typename T, typename SampleT>
 concept DSPStage = ImagStage<T, SampleT> || RealStage<T, SampleT>;
 
 template <typename SampleT, typename... Stages>
-consteval bool valid_pipeline() {
-  constexpr std::array<bool, sizeof...(Stages)> stages{
-      RealStage<Stages, SampleT>...};
+struct ValidPipeline : std::true_type {};
 
-  for (size_t i = 0; i + 1 < stages.size(); ++i)
-    if (stages[i])
-      return false;
-
-  return true;
-}
-
-template <typename SampleT, typename... Stages>
-concept ValidPipeline = valid_pipeline<SampleT, Stages...>();
-
-template <typename SampleT, typename S1, typename S2>
-constexpr bool compatible_sizes() {
-  return S1::static_output_size() == S2::static_input_size();
-}
-
-template <typename SampleT, typename S1> constexpr bool valid_sizes() {
-  return true;
-}
+template <typename SampleT, typename S1>
+struct ValidPipeline<SampleT, S1> : std::true_type {};
 
 template <typename SampleT, typename S1, typename S2, typename... Rest>
-constexpr bool valid_sizes() {
-  if constexpr (!compatible_sizes<SampleT, S1, S2>())
-    return false;
-  else
-    return valid_sizes<SampleT, S2, Rest...>();
-}
+struct ValidPipeline<SampleT, S1, S2, Rest...> {
+  static constexpr bool value =
+      !RealStage<S1, SampleT> && ValidPipeline<SampleT, S2, Rest...>::value;
+};
 
 template <typename SampleT, typename... Stages>
-concept ValidSizes = valid_sizes<SampleT, Stages...>();
+static constexpr bool ValidPipeline_v =
+    ValidPipeline<SampleT, Stages...>::value;
+
+template <typename S1, typename S2> struct CompatibleSizes {
+  static constexpr bool value =
+      S1::static_output_size() == S2::static_input_size();
+};
+
+template <typename S1, typename S2>
+static constexpr bool CompatibleSizes_v = CompatibleSizes<S1, S2>::value;
+
+template <typename... Stages> struct ValidSizes : std::true_type {};
+
+template <typename S1, typename S2, typename... Rest>
+struct ValidSizes<S1, S2, Rest...> {
+  static constexpr bool value =
+      CompatibleSizes_v<S1, S2> && ValidSizes<S2, Rest...>::value;
+};
+
+template <typename... Stages>
+static constexpr bool ValidSizes_v = ValidSizes<Stages...>::value;
